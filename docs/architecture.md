@@ -1,65 +1,72 @@
 # Architecture
 
-How the code is organised and why. The rules themselves are in [CONTRIBUTING.md](../CONTRIBUTING.md); this document
-explains the shape they produce and lists the places where the codebase currently breaks them.
+This document describes the implemented Lumora browser client. The project is a React 19 and TypeScript single-page app built with Vite, React Router, TanStack Query, Zustand, Tailwind CSS, and Vitest. Vite serves the development app on port 5173 by default and writes production output to `dist/`.
 
-## Layers and dependency direction
+## Application shell and routes
 
-Dependencies point **down** this list only. A layer may import from layers below it, never from layers above it.
+`src/main.tsx` mounts the application, providers, and global styles. `src/App.tsx` defines the browser routes, shared layout, lazy-loaded pages, authentication guards, not-found page, and development-only `/style-guide` route. Public pages include the landing page, artist profiles, categories, email verification, and guest authentication forms. Account, purchase, listing, wallet, and payout pages are guarded in the client with `RequireAuth` or the artist guard.
 
-```text
-main.tsx / App.tsx        application shell: providers, routes, error boundary
-        |
-        v
-features/<feature>/       self-contained domain modules (auth, payments, marketplace, ...)
-        |
-        v
-components/ui, hooks      presentational design system; cross-feature hooks
-        |
-        v
-services, stores          http client, query client, global UI store
-        |
-        v
-config, lib, types        environment, constants, framework-agnostic utilities, shared types
+Client guards are navigation controls, not authorization boundaries. The API must validate identity, permissions, ownership, and transaction state for every protected operation.
+
+## Source layout
+
+| Location | Responsibility |
+| --- | --- |
+| `src/features/auth/` | Authentication pages, session and wallet state, API services, and route guards |
+| `src/features/profile/` | Artist profiles, profile editing, favorites, and profile services |
+| `src/features/marketplace/` | Category pages, artwork listing forms, checkout, and marketplace utilities |
+| `src/features/orders/`, `payments/`, `transactions/`, `portfolio/` | Purchases, payment flows, transaction history, and artist withdrawals |
+| `src/features/commissions/`, `messaging/`, `notifications/` | Supporting feature modules and feature-specific types/utilities |
+| `src/components/` | Shared layout, navigation, forms, CSV import, image upload, and reusable UI |
+| `src/services/` | Shared HTTP client and request validation |
+| `src/stores/` | Shared query client and UI state |
+| `src/hooks/` | Cross-feature React hooks |
+| `src/config/` | Runtime environment, Stellar settings, assets, and feature flags |
+| `src/lib/`, `src/types/` | Framework-independent helpers and shared API/domain types |
+| `api/` | Small serverless API handlers for artist, marketplace, and portfolio lookups |
+| `docs/` | Project documentation |
+
+Features are organized around user-facing domains. Prefer a feature's public `index.ts` for cross-feature imports; route-level lazy imports in `App.tsx` intentionally load concrete page modules so their code stays in separate chunks. Keep shared presentation in `components/ui` and shared, domain-neutral behavior in `lib`, `hooks`, or `services`.
+
+## Forms, uploads, and imports
+
+Forms use React Hook Form and Zod where appropriate. Shared request validation in `src/services/requestValidation.ts` checks API paths and applies client-side request limits; the server still needs its own validation and rate limiting.
+
+The CSV flow in `src/components/ImportCSV.tsx` parses the selected file, shows a preview, and waits for explicit confirmation before invoking the import callback. `src/lib/csvImport.ts` enforces the `.csv` extension and supported MIME types when supplied, a 2 MiB file limit, a default limit of 100 data rows and 10 columns, a header row, and valid CSV structure. Imported cells are sanitized and spreadsheet-formula prefixes are neutralized. These checks reduce accidental or unsafe client-side input; they do not replace server-side validation.
+
+Image uploads are handled by the profile image-upload service and marketplace deliverable flows. Validate file content, authorization, storage access, and size again at the API/storage boundary.
+
+## Configuration and commands
+
+Copy `.env.example` to `.env`. `VITE_API_URL`, `VITE_STELLAR_NETWORK`, and `VITE_APP_URL` are required. The development fallback values target a local API at port 4000, Stellar Testnet, and the Vite app at port 5173. Production builds require explicit valid values, and `VITE_API_URL` must be HTTPS. Invalid production configuration is surfaced through the configuration error screen.
+
+Optional `VITE_FF_MESSAGING`, `VITE_FF_NOTIFICATIONS`, and `VITE_FF_ADVANCED_FILTERS` values override feature defaults. Feature configuration can also consume remote configuration; unset values do not imply that every feature is enabled.
+
+The package manager is npm 10.9.2. The supported project scripts are:
+
+```bash
+npm run dev
+npm run build
+npm run preview
+npm run lint
+npm run format:check
+npm run type-check
+npm test
+npm run check
 ```
 
-Features sit side by side and do not import each other's internals. When two features need the same code it is
-promoted down a layer (`lib/`, `hooks/`, `types/`, `components/ui/`) instead of one feature reaching into the other.
+`npm run check` runs lint, formatting, type checking, tests, and a production build. Tests use Vitest with the configured browser-like test environment.
 
-## The rules and why they exist
+## Reliability and security boundaries
 
-1. **A feature's `index.ts` (its barrel) is the only import surface.** Other modules import `@/features/auth`, never
-   `@/features/auth/components/...`. This lets a feature reorganise its internals without touching its consumers and
-   makes the public surface obvious.
-2. **Cross-feature imports go through barrels.** It keeps the feature graph legible and prevents cycles caused by
-   one feature reaching into another's private files.
-3. **`components/ui` is presentational.** Props in, markup out: no API calls, no stores, no business rules, no
-   feature imports. That keeps the design system reusable and testable in isolation, and keeps it at the bottom of
-   the dependency graph so features can use it freely.
-4. **Design tokens only.** Colours, radii, shadows and type sizes come from the Tailwind theme, never from raw hex
-   values, so light/dark theming and re-skinning stay one-place changes.
-5. **Undocumented locations need a doc update first.** Where new code goes should never be a guess; if no row in
-   "Where Does New Code Go?" fits, the table is extended in the same PR.
+- Every `VITE_*` value is compiled into client-visible code. Store no API secrets, passwords, tokens, or signing keys in frontend environment variables.
+- Production API traffic must use HTTPS. The browser client sends bearer credentials to the configured API; HTTP client error handling redacts sensitive URL details before reporting errors.
+- Session state and tokens are client-side and can be inspected by the browser user. `sessionStorage` session identity/lifetime tracking is not a substitute for server-side token validation, revocation, or authorization.
+- Wallet signing is delegated to the connected Stellar wallet. Never treat a public wallet address or client-reported transaction status as proof of permission or settlement; verify relevant state with the trusted API/network.
+- User-provided text is sanitized for display where applicable. Sanitization is defense in depth, not a replacement for context-aware output encoding or API validation.
+- CSV limits, request-path checks, and client-side rate limits are usability safeguards. Attackers can bypass the browser, so enforce resource limits and abuse controls on the server too.
+- Do not execute user code in the browser or treat client state as trusted. Any future execution or financial decision must be performed and validated by an appropriately isolated backend or on-chain contract.
 
-## Known exceptions
+## Tests and maintenance
 
-These seven deep imports (they bypass a feature barrel) exist today. (`main.tsx` and `services/http.ts` no longer reach into feature internals.) They are tolerated, not endorsed: each lists why it
-exists and what would remove it.
-
-| Importer                                       | Imports                                                                    | Why it exists                                                                                |
-| ---------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `features/payments/PaymentAssetSelector.tsx`   | `@/features/auth/hooks/useWallet`                                          | The wallet hook is not exported from the `auth` barrel; payments needs the connected wallet. |
-| `features/payments/TransactionSigningFlow.tsx` | `auth/hooks/useWallet`, `auth/services/wallets`, `auth/stores/walletStore` | Signing needs the wallet connection and signer, which `auth` keeps private.                  |
-| `features/payments/WalletBalanceDisplay.tsx`   | `@/features/auth/hooks/useWallet`                                          | Same as `PaymentAssetSelector`.                                                              |
-| `features/portfolio/ArtistWithdrawal.tsx`      | `@/features/auth/types` (`LinkedWallet`)                                   | The linked-wallet type is not re-exported from the `auth` barrel.                            |
-| `features/profile/types.ts`                    | `@/features/auth/types` (`UserRole`)                                       | `UserRole` lives with the auth types; profile reuses it.                                     |
-| `features/profile/hooks/useUpdateProfile.ts`   | `auth/stores/authStore`, `auth/stores/useAuthStore`                        | Updating a profile must refresh the signed-in user held in the auth stores.                  |
-| `features/profile/services/profileService.ts`  | `@/features/auth/types` (`User`)                                           | The `User` model is defined by `auth`.                                                       |
-
-The first three can be removed by exporting `useWallet` (and the signer helpers) from the `auth` barrel; the type
-imports by promoting `LinkedWallet`, `User` and `UserRole` to `src/types`.
-
-## Tests next to code
-
-Unit and component tests live beside the file they cover (`Foo.tsx` / `Foo.test.ts`). Pure logic belongs in `lib/`
-or a feature `utils.ts` so it can be tested without rendering.
+Tests are kept near the code they cover or in feature-specific test directories. Existing tests cover routes, API clients, form behavior, import parsing, security-sensitive utilities, and feature flows. Update the route and environment descriptions here and in the README when implementation changes.
