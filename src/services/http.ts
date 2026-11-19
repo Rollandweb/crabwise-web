@@ -153,6 +153,21 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   HTTP_ERROR: 'The request could not be completed.',
 }
 
+/** Longest server-supplied message we will surface to the user. */
+const MAX_SERVER_MESSAGE_LENGTH = 300
+
+/**
+ * Returns the server's own message only when it is a usable, bounded string.
+ * Anything else (missing, non-string, empty, oversized) is discarded so that
+ * a malformed response can never break error handling.
+ */
+function sanitizeServerMessage(message: unknown): string {
+  if (typeof message !== 'string') return ''
+  const trimmed = message.trim()
+  if (!trimmed || trimmed.length > MAX_SERVER_MESSAGE_LENGTH) return ''
+  return trimmed
+}
+
 /**
  * Maps an error code (with an HTTP status fallback) to user-facing copy.
  * `serverMessage` is the DTO's own message, used when no curated copy exists.
@@ -163,7 +178,7 @@ export function getApiErrorMessage(
   serverMessage?: string,
 ): string {
   const mapped = API_ERROR_MESSAGES[code]
-  const own = typeof serverMessage === 'string' ? serverMessage.trim() : ''
+  const own = sanitizeServerMessage(serverMessage)
   // HTTP_ERROR means the response carried no code, so nothing is curated for
   // it: the server's own message wins when present.
   if (own && (!mapped || code === 'HTTP_ERROR')) return own
@@ -186,13 +201,20 @@ function normalizeError(error: AxiosError): ApiError {
     const body: unknown = response.data
     const data: ApiErrorDto | undefined =
       typeof body === 'object' && body !== null ? (body as ApiErrorDto) : undefined
-    const code = data?.code ?? (response.status === 422 ? 'VALIDATION_FAILED' : 'HTTP_ERROR')
+    const rawCode = data?.code
+    const code =
+      typeof rawCode === 'string' && rawCode.length > 0
+        ? rawCode
+        : response.status === 422
+          ? 'VALIDATION_FAILED'
+          : 'HTTP_ERROR'
+    const requestId = typeof data?.requestId === 'string' ? data.requestId : null
     return new ApiError(
       response.status,
       code,
       getApiErrorMessage(code, response.status, data?.message),
       parseFieldErrors(data?.errors),
-      data?.requestId ?? null,
+      requestId,
     )
   }
 
@@ -323,28 +345,4 @@ function buildClient(): AxiosInstance {
   )
 
   return client
-}
-
-const client = buildClient()
-
-/** Typed HTTP helpers backed by the shared client. */
-export interface Http {
-  get<T>(url: string, config?: AxiosRequestConfig): Promise<T>
-  post<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
-  put<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
-  patch<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
-  delete<T>(url: string, config?: AxiosRequestConfig): Promise<T>
-}
-
-export const http: Http = {
-  get: async <T>(url: string, config?: AxiosRequestConfig): Promise<T> =>
-    (await client.get<T>(url, config)).data,
-  post: async <T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> =>
-    (await client.post<T>(url, data, config)).data,
-  put: async <T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> =>
-    (await client.put<T>(url, data, config)).data,
-  patch: async <T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> =>
-    (await client.patch<T>(url, data, config)).data,
-  delete: async <T>(url: string, config?: AxiosRequestConfig): Promise<T> =>
-    (await client.delete<T>(url, config)).data,
 }

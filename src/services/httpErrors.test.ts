@@ -117,6 +117,32 @@ describe('http error normalization', () => {
       })
     }
   })
+
+  it('never crashes or leaks request internals when the response is missing details', async () => {
+    const adapter: AxiosAdapter = async (config) => {
+      throw new AxiosError('Request failed', 'ERR_BAD_REQUEST', config, { secret: 'token-123' }, {
+        data: undefined,
+        status: 500,
+        statusText: 'Error',
+        headers: {},
+        config,
+      })
+    }
+
+    try {
+      await http.post('/things', { password: 'hunter2' }, { adapter })
+      expect.fail('request should reject')
+    } catch (error) {
+      expect(isApiError(error)).toBe(true)
+      expect(error).toMatchObject({
+        status: 500,
+        code: 'HTTP_ERROR',
+        message: 'The request could not be completed.',
+      })
+      expect(JSON.stringify(error)).not.toContain('token-123')
+      expect(JSON.stringify(error)).not.toContain('hunter2')
+    }
+  })
 })
 
 describe('getApiErrorMessage', () => {
